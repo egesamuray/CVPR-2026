@@ -6,21 +6,21 @@ import torch.nn.functional as F
 
 def timestep_embedding(timesteps, embed_dim):
     """
-    Sinusoidal timestep embeddings (like DDPM/Transformers).
-    timesteps: [B] float in [0,1]
+    Sinusoidal embeddings as in DDPM/Transformers.
+    timesteps: [B] float or int; we expect RAW integer steps (0..T-1) for a healthy spectrum.
     returns: [B, embed_dim]
     """
     device = timesteps.device
     half = embed_dim // 2
     freqs = torch.exp(-math.log(10000) * torch.arange(0, half, device=device).float() / half)
-    angles = timesteps[:, None] * freqs[None, :]
+    angles = timesteps.float()[:, None] * freqs[None, :]
     emb = torch.cat([torch.sin(angles), torch.cos(angles)], dim=1)
     if embed_dim % 2 == 1:
         emb = F.pad(emb, (0, 1))
     return emb
 
 class ResBlock(nn.Module):
-    """Residual block with timestep embedding injection."""
+    """Residual block with FiLM-like time/class injection."""
     def __init__(self, n_channels, time_embed_dim):
         super().__init__()
         self.norm1 = nn.GroupNorm(num_groups=8, num_channels=n_channels)
@@ -41,14 +41,15 @@ class ResBlock(nn.Module):
 class SR3UNet(nn.Module):
     """
     SR3 UNet (x0-parameterization): input is concat(noisy_HR, upsampled_LR) => 6 channels.
-    Predicts the denoised HR image \hat{x}_0 at timestep t.
+    Predicts \hat{x}_0 at timestep t. Optional class_id allows a single model for text vs face.
     """
-    def __init__(self, in_ch=3, out_ch=3, base_nf=64, num_res_blocks=2):
+    def __init__(self, in_ch=3, out_ch=3, base_nf=64, num_res_blocks=2, num_classes=None):
         super().__init__()
         self.in_ch = in_ch
         self.out_ch = out_ch
         self.base_nf = base_nf
         self.num_res_blocks = num_res_blocks
+        self.num_classes = num_classes
 
         time_embed_dim = base_nf * 4
         self.time_mlp = nn.Sequential(
@@ -56,6 +57,13 @@ class SR3UNet(nn.Module):
             nn.SiLU(),
             nn.Linear(time_embed_dim, time_embed_dim)
         )
+
+        if num_classes is not None and num_classes > 0:
+            self.class_embed = nn.Embedding(num_classes, base_nf)
+            self.class_proj = nn.Linear(base_nf, time_embed_dim)
+        else:
+            self.class_embed = None
+            self.class_proj = None
 
         # encoder
         self.conv_in = nn.Conv2d(in_ch * 2, base_nf, 3, padding=1)
@@ -76,18 +84,22 @@ class SR3UNet(nn.Module):
 
         self.conv_out = nn.Conv2d(base_nf, out_ch, 3, padding=1)
 
-    def forward(self, x_noisy, x_lowres, t):
+    def forward(self, x_noisy, x_lowres, t_raw, class_id=None):
         """
-        x_noisy: [B,3,H,W], x_lowres: [B,3,h,w] --> upsampled to [B,3,H,W]
-        t: [B] float in [0,1]
+        x_noisy: [B,3,H,W]
+        x_lowres: [B,3,h,w] -> upsampled to [B,3,H,W]
+        t_raw: [B] integer or float in [0, T-1] (NOT normalized to [0,1])
+        class_id: [B] (optional), int labels for class-conditioning (e.g., 0=text, 1=face)
         """
         B, _, H, W = x_noisy.shape
         x_lr_up = F.interpolate(x_lowres, size=(H, W), mode='bilinear', align_corners=False)
 
-        # timestep embedding
-        t = t.float()
-        t_emb = timestep_embedding(t, self.base_nf)
+        # build embedding
+        t_emb = timestep_embedding(t_raw, self.base_nf)
         t_emb = self.time_mlp(t_emb)
+        if self.class_embed is not None and class_id is not None:
+            c = self.class_embed(class_id.long())
+            t_emb = t_emb + self.class_proj(c)
 
         # encoder
         x = torch.cat([x_noisy, x_lr_up], dim=1)

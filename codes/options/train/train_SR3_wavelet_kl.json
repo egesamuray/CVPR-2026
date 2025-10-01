@@ -1,0 +1,94 @@
+{
+  "name": "SR3_wavelet_KLHF",
+  "use_tb_logger": true,
+  "model": "sr3",
+  "scale": 4,
+  "gpu_ids": [0],
+
+  "datasets": {
+    "train": {
+      "name": "TextFaceTrain",
+      "mode": "LRHR",
+      "dataroot_HR": "/PATH/TO/HR/train",
+      "dataroot_LR": "/PATH/TO/LR/train",
+      "subset_file": null,
+      "use_shuffle": true,
+      "n_workers": 8,
+      "batch_size": 8,
+      "HR_size": 128,
+      "use_flip": true,
+      "use_rot": true
+    },
+    "val": {
+      "name": "TextFaceVal",
+      "mode": "LRHR",
+      "dataroot_HR": "/PATH/TO/HR/val",
+      "dataroot_LR": "/PATH/TO/LR/val"
+    }
+  },
+
+  "path": {
+    "root": "./",
+    "pretrain_model_G": null
+  },
+
+  "network_G": {
+    "which_model_G": "SR3UNet",
+    "in_nc": 3,
+    "out_nc": 3,
+    "nf": 64,
+    "num_res_blocks": 2
+  },
+
+  "network_D": null,
+
+  "train": {
+    "diffusion_steps": 1000,
+    "beta_start": 0.0001,
+    "beta_end": 0.02,
+
+    "lr_G": 1e-4,
+    "weight_decay_G": 0,
+    "beta1_G": 0.9,
+
+    "lr_scheme": "MultiStepLR",
+    "lr_steps": [50000, 100000, 200000, 300000],
+    "lr_gamma": 0.5,
+
+    "wavelet_filter": "sym7",
+    "wavelet_level": 1,
+
+    "pixel_criterion": "l2",
+    "pixel_weight": 0.10,      // LL anchor
+    "pixel_weight_lh": 0.05,
+    "pixel_weight_hl": 0.05,
+    "pixel_weight_hh": 0.10,
+
+    "eps_weight": 1.0,         // backbone ε-loss weight
+    "t_weight_eps": "sigma_inv_sq",
+
+    "wavelet_loss": "mmd",     // "mmd" | "softkl" | "moment"
+    "gamma_a": 2.0,            // γ(t)=sigmoid(a-b*t/T)
+    "gamma_b": 4.0,
+
+    "use_class_prior": false,  // set true if you add class_id to batches (0=text,1=face)
+    "num_classes": 2,
+    "hist_bins": 128,
+    "hist_min": -0.5,
+    "hist_max": 0.5,
+    "hist_tau": 0.10,
+    "prior_momentum": 0.99,
+
+    "feature_weight": 0,
+    "gan_weight": 0,
+
+    "manual_seed": 0,
+    "niter": 60001,
+    "val_freq": 20000.0
+  },
+
+  "logger": {
+    "print_freq": 2000,
+    "save_checkpoint_freq": 20000.0
+  }
+}

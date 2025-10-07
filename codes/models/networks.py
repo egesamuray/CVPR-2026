@@ -148,3 +148,42 @@ def define_F(opt, use_bn=False):
         netF = nn.DataParallel(netF)
     netF.eval()
     return netF
+
+def define_G(opt):
+    gpu_ids = opt['gpu_ids']
+    opt_net = opt['network_G']
+    which_model = opt_net['which_model_G']
+
+    if which_model == 'sr_resnet':
+        netG = arch.SRResNet(in_nc=opt_net['in_nc'], out_nc=opt_net['out_nc'], nf=opt_net['nf'],
+                             nb=opt_net['nb'], upscale=opt_net['scale'], norm_type=opt_net['norm_type'],
+                             act_type='relu', mode=opt_net['mode'], upsample_mode='pixelshuffle')
+
+    elif which_model == 'sft_arch':
+        netG = sft_arch.SFT_Net()
+
+    elif which_model == 'RRDB_net':
+        netG = arch.RRDBNet(in_nc=opt_net['in_nc'], out_nc=opt_net['out_nc'], nf=opt_net['nf'],
+                            nb=opt_net['nb'], gc=opt_net['gc'], upscale=opt_net['scale'],
+                            norm_type=opt_net['norm_type'], act_type='leakyrelu',
+                            mode=opt_net['mode'], upsample_mode='upconv')
+
+    elif which_model == 'SR3UNet':  # <-- pass through num_classes for completeness
+        netG = diff_net.SR3UNet(in_ch=opt_net['in_nc'],
+                                out_ch=opt_net['out_nc'],
+                                base_nf=opt_net.get('nf', 64),
+                                num_res_blocks=opt_net.get('num_res_blocks', 2),
+                                num_classes=opt_net.get('num_classes', None))
+
+    else:
+        raise NotImplementedError('Generator model [{:s}] not recognized'.format(which_model))
+
+    if opt['is_train']:
+        # your existing init
+        from .networks import init_weights as _init_weights  # or inline call if you have it above
+        _init_weights(netG, init_type='kaiming', scale=0.1)
+    if gpu_ids:
+        assert torch.cuda.is_available()
+        netG = nn.DataParallel(netG)
+        print(netG)
+    return netG

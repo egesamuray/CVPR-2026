@@ -104,6 +104,14 @@ def main():
             # training
             model.feed_data(train_data)
             model.optimize_parameters(current_step)
+            # after model.optimize_parameters(current_step)
+            for s in model.schedulers:  # step AFTER optimizer to silence warning
+                s.step()
+
+            if current_step % int(opt['logger']['save_checkpoint_freq']) == 0:
+                model.save(current_step)                     # <-- writes G_<iter>.pth
+                model.save_training_state(epoch, current_step)
+
 
             # log
             if current_step % opt['logger']['print_freq'] == 0:

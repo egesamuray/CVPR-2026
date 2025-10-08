@@ -1,7 +1,9 @@
 # codes/models/SR3_model.py
 import os
+import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 import pywt
 
@@ -18,8 +20,7 @@ def y_from_rgb01(x):  # x in [0,1]
 def soft_histogram(x, bins, xmin, xmax, tau=0.1, eps=1e-12):
     """
     Differentiable soft-hist via Gaussian kernels over centers in [xmin,xmax].
-    x: [B,1,H,W] or [B,N]
-    returns: probs [B,bins] normalized over bins.
+    x: [B,1,H,W] or [B,N]  -> probs [B,bins]
     """
     if x.dim() > 2:
         x = x.flatten(1)
@@ -32,7 +33,7 @@ def soft_histogram(x, bins, xmin, xmax, tau=0.1, eps=1e-12):
 
 class EMABandPrior:
     """
-    EMA histogram prior per band and (optional) class.
+    EMA histogram prior per HF band and (optional) class.
     Keeps p_bar in simplex; update: p_bar <- m p_bar + (1-m) mean(P_batch)
     """
     def __init__(self, bins=128, momentum=0.99, n_classes=2, device='cpu'):
@@ -58,17 +59,20 @@ class EMABandPrior:
 
 class SR3Model(BaseModel):
     r"""
-    Diffusion training with a wavelet-domain distribution objective.
+    Diffusion training + wavelet-domain distribution objective.
 
     Total loss:
       L = w_eps * E[ ||eps_hat - eps||^2 ]  +  gamma(t) * Σ_b λ_b * D_b( W_b(\hat x_0), W_b(x_0) )
-    where D_b is MMD (default) or soft-histogram KL; b ∈ {LH,HL,HH}.
+    where D_b is KL-to-prior (soft histogram) or MMD; b ∈ {LH,HL,HH}.
     """
     def __init__(self, opt):
         super().__init__(opt)
         self.opt = opt
         train_opt = opt['train']
         net_opt   = opt['network_G']
+
+        # scale (for LR-consistency)
+        self.scale = int(opt.get('scale', 4))
 
         # generator (class-conditional if requested)
         num_classes = train_opt.get('num_classes', None) if train_opt.get('use_class_prior', False) else None
@@ -79,20 +83,22 @@ class SR3Model(BaseModel):
             num_res_blocks=net_opt.get('num_res_blocks', 2),
             num_classes=num_classes
         ).to(self.device)
+        # EMA (recommended for eval/sampling)
+        from copy import deepcopy
+        self.use_ema = bool(train_opt.get('use_ema', False))
+        self.ema_decay = float(train_opt.get('ema_decay', 0.999))
         if opt.get('gpu_ids') and len(opt['gpu_ids']) > 1:
             self.netG = nn.DataParallel(self.netG, device_ids=opt['gpu_ids'])
+        if self.use_ema:
+            self.netG_ema = deepcopy(self.netG).eval()
+            for p in self.netG_ema.parameters(): p.requires_grad_(False)
         self.netG.train()
 
         # pixel criterion for LL anchor (optional)
         self.cri_pix = None
         if float(train_opt.get('pixel_weight', 0)) > 0:
             crit = train_opt.get('pixel_criterion', 'l2').lower()
-            if crit == 'l2':
-                self.cri_pix = nn.MSELoss().to(self.device)
-            elif crit == 'l1':
-                self.cri_pix = nn.L1Loss().to(self.device)
-            else:
-                raise ValueError("pixel_criterion must be l1 or l2")
+            self.cri_pix = (nn.MSELoss() if crit == 'l2' else nn.L1Loss()).to(self.device)
 
         # wavelet settings (normalized filters)
         self.wavelet_filter = train_opt.get('wavelet_filter', 'sym7')
@@ -105,11 +111,10 @@ class SR3Model(BaseModel):
         filt = pywt.Wavelet('norm_wave', [dec_lo, dec_hi, rec_lo, rec_hi])
         self.swt_forward = SWT.SWTForward(self.wavelet_level, filt, mode='periodic').to(self.device)
 
-        # diffusion schedule (linear β)
+        # diffusion schedule
         self.num_steps = int(train_opt.get('diffusion_steps', 1000))
-        beta0 = float(train_opt.get('beta_start', 1e-4))
-        beta1 = float(train_opt.get('beta_end',   2e-2))
-        self.beta_schedule = torch.linspace(beta0, beta1, self.num_steps, device=self.device)
+        schedule = train_opt.get('beta_schedule', 'linear')
+        self.beta_schedule = self._build_beta_schedule(schedule, self.num_steps, device=self.device)
         alphas = 1.0 - self.beta_schedule
         self.alpha_bars = torch.cumprod(alphas, dim=0)
 
@@ -137,15 +142,18 @@ class SR3Model(BaseModel):
         self.w_eps = float(train_opt.get('eps_weight', 1.0))
 
         # wavelet distribution config
-        self.wavelet_loss = train_opt.get('wavelet_loss', 'mmd')  # 'mmd' | 'softkl' | 'moment'
+        self.wavelet_loss = train_opt.get('wavelet_loss', 'softkl')  # 'softkl' | 'mmd' | 'moment'
         self.gamma_a = float(train_opt.get('gamma_a', 2.0))
         self.gamma_b = float(train_opt.get('gamma_b', 4.0))
         self.t_weight_eps = train_opt.get('t_weight_eps', 'sigma_inv_sq')
 
-        # ---- MMD memory budget ----
+        # MMD memory budget
         self.mmd_max_points = int(train_opt.get('mmd_max_points', 4096))
         self.mmd_dtype      = train_opt.get('mmd_dtype', 'float16')
         self.mmd_sigmas     = train_opt.get('mmd_sigmas', [0.5, 1.0, 2.0])
+
+        # LR-consistency (optional)
+        self.lr_cons_w = float(train_opt.get('lr_consistency_weight', 0.0))
 
         # soft-hist / prior options
         self.use_class_prior = bool(train_opt.get('use_class_prior', False))
@@ -170,12 +178,28 @@ class SR3Model(BaseModel):
 
         self.log_dict = {}
 
+    # ---------- beta schedules ----------
+    def _build_beta_schedule(self, kind, T, device):
+        if kind == 'cosine':
+            # Improved DDPM (Nichol & Dhariwal)
+            s = 0.008
+            t = torch.linspace(0, T, T+1, device=device) / T
+            alphas_bar = torch.cos((t + s)/(1+s) * math.pi/2)**2
+            alphas_bar = alphas_bar / alphas_bar[0]
+            betas = 1 - (alphas_bar[1:] / alphas_bar[:-1])
+            return betas.clamp(1e-8, 0.999)
+        else:
+            # linear
+            beta0 = 1e-4
+            beta1 = 2e-2
+            return torch.linspace(beta0, beta1, T, device=device)
+
     # ---------- required hooks ----------
     def feed_data(self, data):
         self.var_L = data['LR'].to(self.device)
         self.var_H = data['HR'].to(self.device)
 
-        # class id: prefer dataset-provided; fallback infer from path tokens (text/face) if prior is enabled
+        # class id: prefer dataset-provided; fallback infer from path tokens ('text'/'face') if prior is enabled
         self.class_id = None
         if 'class_id' in data:
             self.class_id = (data['class_id'].to(self.device)
@@ -188,12 +212,9 @@ class SR3Model(BaseModel):
                     ids = []
                     for p in paths:
                         p_low = str(p).lower()
-                        if 'text' in p_low:
-                            ids.append(0)
-                        elif 'face' in p_low:
-                            ids.append(1)
-                        else:
-                            ids.append(0)
+                        if 'text' in p_low: ids.append(0)
+                        elif 'face' in p_low: ids.append(1)
+                        else: ids.append(0)
                     self.class_id = torch.tensor(ids, device=self.device, dtype=torch.long)
                 else:
                     p_low = str(paths).lower()
@@ -207,10 +228,10 @@ class SR3Model(BaseModel):
     def _wavelet_bands_all_levels(self, x01):
         """
         Return list of (LL, LH, HL, HH) for levels 1..L.
-        Handles SWTForward outputs that are either:
+        Handles SWTForward outputs that are:
           - Tensor [B, 4*L, H, W]
           - List/tuple of Tensors [B,4,H,W] per level
-          - Tuple with a single stacked Tensor at [0]
+          - Tuple with a stacked Tensor at [0]
         """
         y = y_from_rgb01(x01)
         out = self.swt_forward(y)
@@ -246,11 +267,6 @@ class SR3Model(BaseModel):
 
     # ---------- memory-friendly MMD ----------
     def _mmd_loss_band(self, A, B):
-        """
-        A,B: [B,1,H,W]  (per-image MMD, averaged)
-        Subsample per image to self.mmd_max_points, compute pairwise distances with cdist,
-        do kernel math in fp16 on GPU, reuse distances for all σ's.
-        """
         Bsz = A.size(0)
         losses = []
         use_half = (self.mmd_dtype == 'float16' and A.is_cuda)
@@ -327,20 +343,20 @@ class SR3Model(BaseModel):
                 P_bar = torch.cat(priors, dim=0)
                 return _kl_qp(Q, P_bar)  # KL(prior || Q)
             else:
-                return _kl_qp(Q, P)     # KL(P || Q)
+                return _kl_qp(Q, P)     # KL(P || Q) per-image
 
         for (LLf, LHf, HLf, HHf), (LLr, LHr, HLr, HHr), w in zip(bands_f, bands_r, decays):
             if self.cri_pix is not None and self.w_LL > 0:
                 loss_LL = loss_LL + w * self.cri_pix(LLf, LLr)
 
-            if self.wavelet_loss == 'mmd':
-                loss_LH = loss_LH + w * self._mmd_loss_band(LHf, LHr)
-                loss_HL = loss_HL + w * self._mmd_loss_band(HLf, HLr)
-                loss_HH = loss_HH + w * self._mmd_loss_band(HHf, HHr)
-            elif self.wavelet_loss == 'softkl':
+            if self.wavelet_loss == 'softkl':
                 loss_LH = loss_LH + w * _band_softkl(LHf, LHr, 'LH')
                 loss_HL = loss_HL + w * _band_softkl(HLf, HLr, 'HL')
                 loss_HH = loss_HH + w * _band_softkl(HHf, HHr, 'HH')
+            elif self.wavelet_loss == 'mmd':
+                loss_LH = loss_LH + w * self._mmd_loss_band(LHf, LHr)
+                loss_HL = loss_HL + w * self._mmd_loss_band(HLf, HLr)
+                loss_HH = loss_HH + w * self._mmd_loss_band(HHf, HHr)
             else:
                 # ablation: simple moment loss
                 def band_moment_loss(a, b, eps=1e-6):
@@ -354,11 +370,30 @@ class SR3Model(BaseModel):
                 loss_HH = loss_HH + w * band_moment_loss(HHf, HHr)
 
         loss_wav = (self.w_LL * loss_LL) + (self.w_LH * loss_LH) + (self.w_HL * loss_HL) + (self.w_HH * loss_HH)
+
+        # optional LR-consistency (downsample with bicubic antialias to match dataset LR creation)
+        if self.lr_cons_w > 0:
+            down = F.interpolate(x0_hat.clamp(0,1),
+                                 scale_factor=1.0/self.scale,
+                                 mode='bicubic', align_corners=False, antialias=True)
+            loss_lr = F.mse_loss(down, self.var_L)
+            loss_wav = loss_wav + self.lr_cons_w * loss_lr
+            self.log_dict['l_LR'] = float(loss_lr.detach().item())
+
         gamma = self._gamma_t(t_int).mean()
         loss = loss_backbone + gamma * loss_wav
 
         loss.backward()
         self.optimizer_G.step()
+
+        # EMA update
+        if self.use_ema:
+            def _ema_update(ema, online, m):
+                for p_ema, p in zip(ema.parameters(), online.parameters()):
+                    p_ema.data.mul_(m).add_(p.data, alpha=1-m)
+            G_ema = self.netG_ema.module if hasattr(self.netG_ema, 'module') else self.netG_ema
+            G_online = self.netG.module if hasattr(self.netG, 'module') else self.netG
+            _ema_update(G_ema, G_online, self.ema_decay)
 
         # persist EMA priors periodically (no train.py edits)
         try:
@@ -381,11 +416,12 @@ class SR3Model(BaseModel):
         return self.log_dict
 
     def test(self):
-        self.netG.eval()
+        G = self.netG_ema if getattr(self, 'use_ema', False) else self.netG
+        G.eval()
         with torch.no_grad():
             zeros = torch.zeros(self.var_H.size(0), device=self.device)
-            self.fake_H = self.netG(self.var_H, self.var_L, zeros, class_id=self.class_id)
-        self.netG.train()
+            self.fake_H = G(self.var_H, self.var_L, zeros, class_id=self.class_id)
+        G.train()
 
     def get_current_visuals(self, need_HR=True):
         out = {'LR': self.var_L.detach()[0].float().cpu(),

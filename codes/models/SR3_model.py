@@ -153,7 +153,6 @@ class SR3Model(BaseModel):
 
         self.log_dict = {}
 
-    # ---------- beta schedules ----------
     def _build_beta_schedule(self, kind, T, device):
         if kind == 'cosine':
             s = 0.008
@@ -165,7 +164,6 @@ class SR3Model(BaseModel):
         else:
             return torch.linspace(1e-4, 2e-2, T, device=device)
 
-    # ---------- data ----------
     def feed_data(self, data):
         self.var_L = data['LR'].to(self.device)
         self.var_H = data['HR'].to(self.device)
@@ -189,7 +187,6 @@ class SR3Model(BaseModel):
                     cid = 0 if 'text' in p_low else 1 if 'face' in p_low else 0
                     self.class_id = torch.tensor([cid], device=self.device, dtype=torch.long)
 
-        # sanitize embedding indices
         if self.use_class_prior and self.class_id is not None:
             if getattr(self, 'num_classes', None) is not None:
                 if self.num_classes == 1:
@@ -285,8 +282,9 @@ class SR3Model(BaseModel):
         loss_HL = torch.tensor(0.0, device=self.device)
         loss_HH = torch.tensor(0.0, device=self.device)
 
-        def _kl_qp(q, p, eps=1e-12):
+        def _kl_qp(q, p, eps=1e-12):  # KL(p||q)
             return (p * (p.add(eps).log() - q.add(eps).log())).sum(dim=1).mean()
+
         def _band_softkl(f, r, band_name):
             P = soft_histogram(r, self.hist_bins, self.hist_min, self.hist_max, self.hist_tau)
             Q = soft_histogram(f, self.hist_bins, self.hist_min, self.hist_max, self.hist_tau)

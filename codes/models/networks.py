@@ -168,12 +168,14 @@ def define_G(opt):
                             norm_type=opt_net['norm_type'], act_type='leakyrelu',
                             mode=opt_net['mode'], upsample_mode='upconv')
 
-    elif which_model == 'SR3UNet':  # <-- pass through num_classes for completeness
+    # inside define_G(...)
+    elif which_model == 'SR3UNet':
         netG = diff_net.SR3UNet(in_ch=opt_net['in_nc'],
                                 out_ch=opt_net['out_nc'],
                                 base_nf=opt_net.get('nf', 64),
                                 num_res_blocks=opt_net.get('num_res_blocks', 2),
                                 num_classes=opt_net.get('num_classes', None))
+
 
     else:
         raise NotImplementedError('Generator model [{:s}] not recognized'.format(which_model))

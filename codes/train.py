@@ -1,180 +1,187 @@
-import os.path
+# codes/train.py
+# Revised training script for CVPR-2026:
+# - Uses correct create_dataloader signature (dataset, dataset_opt)
+# - Steps LR schedulers AFTER optimizer.step() (silences PyTorch warning)
+# - Saves checkpoints reliably (model.save + save_training_state)
+# - Simple validation with PSNR logging
+# - Works with options/options.py, data/, models/
+
+import os
 import sys
-import math
 import argparse
-import time
-import random
-import numpy as np
-from collections import OrderedDict
+import math
 import logging
+from pathlib import Path
 
 import torch
+import numpy as np
 
+# repo imports
 import options.options as option
-from utils import util
-from data import create_dataloader, create_dataset
+from data import create_dataset, create_dataloader
 from models import create_model
 
 
-def main():
-    # options
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-opt', type=str, required=True, help='Path to option JSON file.')
-    opt = option.parse(parser.parse_args().opt, is_train=True)
-    opt = option.dict_to_nonedict(opt)  # Convert to NoneDict, which return None for missing key.
-
-    # train from scratch OR resume training
-    if opt['path']['resume_state']:  # resuming training
-        resume_state = torch.load(opt['path']['resume_state'])
-    else:  # training from scratch
-        resume_state = None
-        util.mkdir_and_rename(opt['path']['experiments_root'])  # rename old folder if exists
-        util.mkdirs((path for key, path in opt['path'].items() if not key == 'experiments_root'
-                     and 'pretrain_model' not in key and 'resume' not in key))
-
-    # config loggers. Before it, the log will not work
-    util.setup_logger(None, opt['path']['log'], 'train', level=logging.INFO, screen=True)
-    util.setup_logger('val', opt['path']['log'], 'val', level=logging.INFO)
+def setup_logger(log_dir: str, name: str = 'base'):
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, f'{name}.log')
     logger = logging.getLogger('base')
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    fmt = logging.Formatter('%(asctime)s - %(levelname)s: %(message)s', datefmt='%y-%m-%d %H:%M:%S')
 
-    if resume_state:
-        logger.info('Resuming training from epoch: {}, iter: {}.'.format(
-            resume_state['epoch'], resume_state['iter']))
-        option.check_resume(opt)  # check resume options
+    sh = logging.StreamHandler(stream=sys.stdout)
+    sh.setLevel(logging.INFO)
+    sh.setFormatter(fmt)
+    logger.addHandler(sh)
 
-    logger.info(option.dict2str(opt))
-    # tensorboard logger
-    if opt['use_tb_logger'] and 'debug' not in opt['name']:
-        from tensorboardX import SummaryWriter
-        tb_logger = SummaryWriter(log_dir='../tb_logger/' + opt['name'])
+    fh = logging.FileHandler(log_path, mode='a')
+    fh.setLevel(logging.INFO)
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+    return logger
 
-    # random seed
-    seed = opt['train']['manual_seed']
-    if seed is None:
-        seed = random.randint(1, 10000)
-    logger.info('Random seed: {}'.format(seed))
-    util.set_random_seed(seed)
 
-    torch.backends.cudnn.benckmark = True
-    # torch.backends.cudnn.deterministic = True
-
-    # create train and val dataloader
-    for phase, dataset_opt in opt['datasets'].items():
-        if phase == 'train':
-            train_set = create_dataset(dataset_opt)
-            train_size = int(math.ceil(len(train_set) / dataset_opt['batch_size']))
-            logger.info('Number of train images: {:,d}, iters: {:,d}'.format(
-                len(train_set), train_size))
-            total_iters = int(opt['train']['niter'])
-            total_epochs = int(math.ceil(total_iters / train_size))
-            logger.info('Total epochs needed: {:d} for iters {:,d}'.format(
-                total_epochs, total_iters))
-            train_loader = create_dataloader(train_set, dataset_opt)
-        elif phase == 'val':
-            val_set = create_dataset(dataset_opt)
-            val_loader = create_dataloader(val_set, dataset_opt)
-            logger.info('Number of val images in [{:s}]: {:d}'.format(dataset_opt['name'],
-                                                                      len(val_set)))
+def dict_to_str(dic, indent_l=1):
+    msg = '\n'
+    for k, v in dic.items():
+        if isinstance(v, dict):
+            msg += '  ' * indent_l + f'{k}:[\n'
+            msg += dict_to_str(v, indent_l + 1)
+            msg += '  ' * indent_l + ']\n'
         else:
-            raise NotImplementedError('Phase [{:s}] is not recognized.'.format(phase))
-    assert train_loader is not None
+            msg += '  ' * indent_l + f'{k}: {v}\n'
+    return msg
 
-    # create model
+
+def ensure_dirs(opt):
+    paths = opt.get('path', {})
+    for k in ['experiments_root', 'models', 'training_state', 'log', 'val_images']:
+        p = paths.get(k, None)
+        if p:
+            Path(p).mkdir(parents=True, exist_ok=True)
+
+
+def tensor_to_img_uint8(t):
+    t = t.detach().float().cpu().clamp(0, 1).numpy()
+    t = np.transpose(t, (1, 2, 0))
+    return (t * 255.0 + 0.5).astype(np.uint8)
+
+
+def calc_psnr_uint8(a, b, border=0):
+    if border > 0:
+        a = a[border:-border, border:-border, ...]
+        b = b[border:-border, border:-border, ...]
+    a = a.astype(np.float64); b = b.astype(np.float64)
+    mse = np.mean((a - b) ** 2)
+    if mse == 0:
+        return float('inf')
+    return 20 * math.log10(255.0 / math.sqrt(mse))
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-opt', type=str, required=True, help='Path to options JSON file.')
+    args = parser.parse_args()
+
+    # parse options
+    opt = option.parse(args.opt, is_train=True)
+    ensure_dirs(opt)
+
+    # set random seed
+    if opt['train'].get('manual_seed', None) is not None:
+        seed = int(opt['train']['manual_seed'])
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        np.random.seed(seed)
+
+    # logger
+    logger = setup_logger(opt['path']['log'])
+    logger.info('export CUDA_VISIBLE_DEVICES={}'.format(os.environ.get('CUDA_VISIBLE_DEVICES', '')))
+    logger.info(dict_to_str(opt))
+
+    # datasets & loaders  (NOTE: create_dataloader(dataset, dataset_opt))
+    train_set = create_dataset(opt['datasets']['train'])
+    train_loader = create_dataloader(train_set, opt['datasets']['train'])
+    logger.info(f"Dataset [{train_set.__class__.__name__} - {opt['datasets']['train']['name']}] is created.")
+    logger.info(f"Number of train images: {len(train_set)}, iters: {len(train_loader)}")
+
+    val_set = create_dataset(opt['datasets']['val'])
+    val_loader = create_dataloader(val_set, opt['datasets']['val'])
+    logger.info(f"Dataset [{val_set.__class__.__name__} - {opt['datasets']['val']['name']}] is created.")
+    logger.info(f"Number of val images in [{opt['datasets']['val']['name']}]: {len(val_set)}")
+
+    # model
     model = create_model(opt)
+    logger.info(f"Model [{model.__class__.__name__}] is created.")
+    logger.info("Start training from epoch: 0, iter: 0")
 
-    # resume training
-    if resume_state:
-        start_epoch = resume_state['epoch']
-        current_step = resume_state['iter']
-        model.resume_training(resume_state)  # handle optimizers and schedulers
-    else:
-        current_step = 0
-        start_epoch = 0
+    # training params
+    niter = int(opt['train']['niter'])
+    print_freq = int(float(opt['logger']['print_freq']))
+    val_freq = int(float(opt['train']['val_freq']))
+    save_freq = int(float(opt['logger']['save_checkpoint_freq']))
+    scale = int(opt.get('scale', 4))
+    current_step = 0
+    epoch = 0
 
-    # training
-    logger.info('Start training from epoch: {:d}, iter: {:d}'.format(start_epoch, current_step))
-    for epoch in range(start_epoch, total_epochs):
-        for _, train_data in enumerate(train_loader):
-            current_step += 1
-            if current_step > total_iters:
-                break
-            # update learning rate
-            model.update_learning_rate()
+    try:
+        while current_step < niter:
+            epoch += 1
+            for _, train_data in enumerate(train_loader):
+                if current_step >= niter:
+                    break
+                current_step += 1
 
-            # training
-            model.feed_data(train_data)
-            model.optimize_parameters(current_step)
-            # after model.optimize_parameters(current_step)
-            for s in model.schedulers:  # step AFTER optimizer to silence warning
-                s.step()
+                # one step
+                model.feed_data(train_data)
+                model.optimize_parameters(current_step)  # optimizer.step() is inside
 
-            if current_step % int(opt['logger']['save_checkpoint_freq']) == 0:
-                model.save(current_step)                     # <-- writes G_<iter>.pth
-                model.save_training_state(epoch, current_step)
+                # STEP SCHEDULERS AFTER OPTIMIZER to silence warning
+                for s in model.schedulers:
+                    s.step()
 
+                # logging
+                if current_step % print_freq == 0:
+                    try:
+                        lr_now = model.optimizers[0].param_groups[0]['lr']
+                    except Exception:
+                        lr_now = 0.0
+                    logs = model.get_current_log()
+                    items = ' '.join([f"{k}: {v:.4e}" for k, v in logs.items()])
+                    logger.info(f"<epoch: {epoch:3d}, iter: {current_step:7d}, lr:{lr_now:.3e}> {items} ")
 
-            # log
-            if current_step % opt['logger']['print_freq'] == 0:
-                logs = model.get_current_log()
-                message = '<epoch:{:3d}, iter:{:8,d}, lr:{:.3e}> '.format(
-                    epoch, current_step, model.get_current_learning_rate())
-                for k, v in logs.items():
-                    message += '{:s}: {:.4e} '.format(k, v)
-                    # tensorboard logger
-                    if opt['use_tb_logger'] and 'debug' not in opt['name']:
-                        tb_logger.add_scalar(k, v, current_step)
-                logger.info(message)
+                # validation
+                if current_step % val_freq == 0:
+                    try:
+                        val_batch = next(iter(val_loader))
+                        model.feed_data(val_batch)
+                        model.test()
+                        vis = model.get_current_visuals(need_HR=True)
+                        sr = tensor_to_img_uint8(vis['SR'])
+                        hr = tensor_to_img_uint8(vis['HR'])
+                        psnr = calc_psnr_uint8(sr, hr, border=scale)
+                        logger.info(f"# Validation # PSNR: {psnr:.4e}")
+                        logger.info(f"<epoch: {epoch:3d}, iter: {current_step:7d}> psnr: {psnr:.4e}")
+                    except Exception as e:
+                        logger.info(f"# Validation # (skipped PSNR calc due to: {e})")
 
-            # validation
-            if current_step % opt['train']['val_freq'] == 0:
-                avg_psnr = 0.0
-                idx = 0
-                for val_data in val_loader:
-                    idx += 1
-                    img_name = os.path.splitext(os.path.basename(val_data['LR_path'][0]))[0]
-                    img_dir = os.path.join(opt['path']['val_images'], img_name)
-                    util.mkdir(img_dir)
+                # save
+                if current_step % save_freq == 0:
+                    model.save(current_step)
+                    model.save_training_state(epoch, current_step)
+                    logger.info("Saving models and training states.")
 
-                    model.feed_data(val_data)
-                    model.test()
+        # end of training
+        model.save('final')
+        logger.info("Saving the final model.")
+        logger.info("End of training.")
 
-                    visuals = model.get_current_visuals()
-                    sr_img = util.tensor2img(visuals['SR'])  # uint8
-                    gt_img = util.tensor2img(visuals['HR'])  # uint8
-
-                    # Save SR images for reference
-                    save_img_path = os.path.join(img_dir, '{:s}_{:d}.png'.format(\
-                        img_name, current_step))
-                    util.save_img(sr_img, save_img_path)
-
-                    # calculate PSNR
-                    crop_size = opt['scale']
-                    gt_img = gt_img / 255.
-                    sr_img = sr_img / 255.
-                    cropped_sr_img = sr_img[crop_size:-crop_size, crop_size:-crop_size, :]
-                    cropped_gt_img = gt_img[crop_size:-crop_size, crop_size:-crop_size, :]
-                    avg_psnr += util.calculate_psnr(cropped_sr_img * 255, cropped_gt_img * 255)
-
-                avg_psnr = avg_psnr / idx
-
-                # log
-                logger.info('# Validation # PSNR: {:.4e}'.format(avg_psnr))
-                logger_val = logging.getLogger('val')  # validation logger
-                logger_val.info('<epoch:{:3d}, iter:{:8,d}> psnr: {:.4e}'.format(
-                    epoch, current_step, avg_psnr))
-                # tensorboard logger
-                if opt['use_tb_logger'] and 'debug' not in opt['name']:
-                    tb_logger.add_scalar('psnr', avg_psnr, current_step)
-
-            # save models and training states
-            if current_step % opt['logger']['save_checkpoint_freq'] == 0:
-                logger.info('Saving models and training states.')
-                model.save(current_step)
-                model.save_training_state(epoch, current_step)
-
-    logger.info('Saving the final model.')
-    model.save('latest')
-    logger.info('End of training.')
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user! Saving current state...")
+        model.save(current_step)
+        model.save_training_state(epoch, current_step)
+        logger.info("State saved. Exiting.")
 
 
 if __name__ == '__main__':

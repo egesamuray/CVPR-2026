@@ -194,12 +194,12 @@ class SR3Model(BaseModel):
             beta1 = 2e-2
             return torch.linspace(beta0, beta1, T, device=device)
 
-    # ---------- required hooks ----------
+    # --- inside class SR3Model(BaseModel) ---
+
     def feed_data(self, data):
         self.var_L = data['LR'].to(self.device)
         self.var_H = data['HR'].to(self.device)
 
-        # class id: prefer dataset-provided; fallback infer from path tokens ('text'/'face') if prior is enabled
         self.class_id = None
         if 'class_id' in data:
             self.class_id = (data['class_id'].to(self.device)
@@ -212,14 +212,22 @@ class SR3Model(BaseModel):
                     ids = []
                     for p in paths:
                         p_low = str(p).lower()
-                        if 'text' in p_low: ids.append(0)
-                        elif 'face' in p_low: ids.append(1)
-                        else: ids.append(0)
+                    # fallback mapping BEFORE clamping
+                        ids.append(0 if 'text' in p_low else 1 if 'face' in p_low else 0)
                     self.class_id = torch.tensor(ids, device=self.device, dtype=torch.long)
                 else:
                     p_low = str(paths).lower()
-                    cid = 0 if 'text' in p_low else (1 if 'face' in p_low else 0)
+                    cid = 0 if 'text' in p_low else 1 if 'face' in p_low else 0
                     self.class_id = torch.tensor([cid], device=self.device, dtype=torch.long)
+
+    # ---- NEW: sanitize to valid embedding range ----
+        if self.use_class_prior and self.class_id is not None:
+            if getattr(self, 'num_classes', None) is not None:
+                if self.num_classes == 1:
+                # faces-only training: collapse to class 0
+                    self.class_id = torch.zeros_like(self.class_id)
+                else:
+                    self.class_id = self.class_id.clamp(0, self.num_classes - 1)
 
     def _gamma_t(self, t_int):
         t_norm = t_int.float() / max(1, (self.num_steps - 1))

@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 def timestep_embedding(timesteps, embed_dim):
-    r"""
+    """
     Sinusoidal timestep embeddings as in DDPM/Transformers.
     timesteps: [B] float or int; we expect RAW integer steps (0..T-1) for a healthy spectrum.
     returns: [B, embed_dim]
@@ -39,7 +39,7 @@ class ResBlock(nn.Module):
         return x + y
 
 class SR3UNet(nn.Module):
-    r"""
+    """
     SR3 UNet (x0 parameterization): input is concat(noisy_HR, upsampled_LR) => 6 channels.
     Predicts \hat{x}_0 at timestep t. Optional class_id allows one model to handle multiple classes.
     """
@@ -129,4 +129,3 @@ class SR3UNet(nn.Module):
             x = block(x, t_emb)
 
         return self.conv_out(x)
-

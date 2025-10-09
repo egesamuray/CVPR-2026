@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 def timestep_embedding(timesteps, embed_dim):
-    """
+    r"""
     Sinusoidal timestep embeddings as in DDPM/Transformers.
     timesteps: [B] float or int; we expect RAW integer steps (0..T-1) for a healthy spectrum.
     returns: [B, embed_dim]
@@ -39,9 +39,9 @@ class ResBlock(nn.Module):
         return x + y
 
 class SR3UNet(nn.Module):
-    """
-    SR3 UNet (x0-parameterization): input is concat(noisy_HR, upsampled_LR) => 6 channels.
-    Predicts x0 at timestep t. Optional class_id allows one model to handle multiple classes.
+    r"""
+    SR3 UNet (x0 parameterization): input is concat(noisy_HR, upsampled_LR) => 6 channels.
+    Predicts \hat{x}_0 at timestep t. Optional class_id allows one model to handle multiple classes.
     """
     def __init__(self, in_ch=3, out_ch=3, base_nf=64, num_res_blocks=2, num_classes=None):
         super().__init__()
@@ -92,7 +92,6 @@ class SR3UNet(nn.Module):
         class_id: [B] optional integer labels for class-conditioning
         """
         B, _, H, W = x_noisy.shape
-        # upsample LR to match HR spatial size
         x_lr_up = F.interpolate(x_lowres, size=(H, W), mode='bilinear', align_corners=False)
 
         # time / class embeddings
@@ -122,13 +121,10 @@ class SR3UNet(nn.Module):
         x = self.mid(x, t_emb)
 
         # decoder
-        x = self.up3_conv(x)
-        x = x + skip2
+        x = self.up3_conv(x); x = x + skip2
         for block in self.up3:
             x = block(x, t_emb)
-
-        x = self.up2_conv(x)
-        x = x + skip1
+        x = self.up2_conv(x); x = x + skip1
         for block in self.up2:
             x = block(x, t_emb)
 

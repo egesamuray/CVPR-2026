@@ -1,4 +1,3 @@
-// codes/options/train/train_SR3_wavelet_faces_x8.json
 {
   "name": "SR3_wavelet_KLPRIOR_FFHQx8_16to128",
   "use_tb_logger": false,
@@ -12,18 +11,25 @@
       "mode": "LRHR",
       "dataroot_HR": "/content/faces_x8/HR/face/train",
       "dataroot_LR": "/content/faces_x8/LR/face/train",
+      "subset_file": null,
       "use_shuffle": true,
       "n_workers": 4,
       "batch_size": 16,
       "HR_size": 128,
       "use_flip": true,
-      "use_rot": false
+      "use_rot": false,
+      "phase": "train",
+      "scale": 8,
+      "data_type": "img"
     },
     "val": {
       "name": "FFHQ_val_face",
       "mode": "LRHR",
       "dataroot_HR": "/content/faces_x8/HR/face/val",
-      "dataroot_LR": "/content/faces_x8/LR/face/val"
+      "dataroot_LR": "/content/faces_x8/LR/face/val",
+      "phase": "val",
+      "scale": 8,
+      "data_type": "img"
     }
   },
 

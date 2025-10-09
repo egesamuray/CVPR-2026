@@ -168,22 +168,20 @@ def define_G(opt):
                             norm_type=opt_net['norm_type'], act_type='leakyrelu',
                             mode=opt_net['mode'], upsample_mode='upconv')
 
-    # inside define_G(...)
-    elif which_model == 'SR3UNet':
+    elif which_model == 'SR3UNet':  # <-- use which_model, not which_model_G
+        
+        import models.modules.diffusion_net as diff_net
         netG = diff_net.SR3UNet(in_ch=opt_net['in_nc'],
                                 out_ch=opt_net['out_nc'],
                                 base_nf=opt_net.get('nf', 64),
                                 num_res_blocks=opt_net.get('num_res_blocks', 2),
                                 num_classes=opt_net.get('num_classes', None))
-
-
     else:
-        raise NotImplementedError('Generator model [{:s}] not recognized'.format(which_model))
+        raise NotImplementedError(f"Generator model [{which_model}] not recognized")
 
     if opt['is_train']:
-        # your existing init
-        from .networks import init_weights as _init_weights  # or inline call if you have it above
-        _init_weights(netG, init_type='kaiming', scale=0.1)
+        from .networks import init_weights as _init
+        _init(netG, init_type='kaiming', scale=0.1)
     if gpu_ids:
         assert torch.cuda.is_available()
         netG = nn.DataParallel(netG)

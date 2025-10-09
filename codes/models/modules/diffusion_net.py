@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 def timestep_embedding(timesteps, embed_dim):
     """
-    Sinusoidal embeddings as in DDPM/Transformers.
+    Sinusoidal timestep embeddings as in DDPM/Transformers.
     timesteps: [B] float or int; we expect RAW integer steps (0..T-1) for a healthy spectrum.
     returns: [B, embed_dim]
     """
@@ -41,7 +41,7 @@ class ResBlock(nn.Module):
 class SR3UNet(nn.Module):
     """
     SR3 UNet (x0-parameterization): input is concat(noisy_HR, upsampled_LR) => 6 channels.
-    Predicts \hat{x}_0 at timestep t. Optional class_id allows a single model for text vs face.
+    Predicts x0 at timestep t. Optional class_id allows one model to handle multiple classes.
     """
     def __init__(self, in_ch=3, out_ch=3, base_nf=64, num_res_blocks=2, num_classes=None):
         super().__init__()
@@ -86,23 +86,24 @@ class SR3UNet(nn.Module):
 
     def forward(self, x_noisy, x_lowres, t_raw, class_id=None):
         """
-        x_noisy: [B,3,H,W]
-        x_lowres: [B,3,h,w] -> upsampled to [B,3,H,W]
-        t_raw: [B] integer or float in [0, T-1] (NOT normalized to [0,1])
-        class_id: [B] (optional), int labels for class-conditioning (e.g., 0=text, 1=face)
+        x_noisy:  [B,3,H,W]  (noisy HR)
+        x_lowres: [B,3,h,w]  (LR conditioning; will be upsampled to HxW)
+        t_raw:    [B] int/float in [0, T-1]
+        class_id: [B] optional integer labels for class-conditioning
         """
         B, _, H, W = x_noisy.shape
+        # upsample LR to match HR spatial size
         x_lr_up = F.interpolate(x_lowres, size=(H, W), mode='bilinear', align_corners=False)
 
-        # build embedding
+        # time / class embeddings
         t_emb = timestep_embedding(t_raw, self.base_nf)
         t_emb = self.time_mlp(t_emb)
         if self.class_embed is not None and class_id is not None:
-            c = self.class_embed(class_id.long())
-            t_emb = t_emb + self.class_proj(c)
+            ce = self.class_embed(class_id.long())
+            t_emb = t_emb + self.class_proj(ce)
 
         # encoder
-        x = torch.cat([x_noisy, x_lr_up], dim=1)
+        x = torch.cat([x_noisy, x_lr_up], dim=1)       # [B, 6, H, W]
         x = self.conv_in(x)
         for block in self.down1:
             x = block(x, t_emb)
@@ -132,3 +133,4 @@ class SR3UNet(nn.Module):
             x = block(x, t_emb)
 
         return self.conv_out(x)
+

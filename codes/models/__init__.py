@@ -1,22 +1,23 @@
 # codes/models/__init__.py
 import logging
-logger = logging.getLogger('base')
 
 def create_model(opt):
-    model = opt['model']
+    """
+    Factory that returns an initialized model instance based on opt['model'].
+    Valid values: 'sr3' (our diffusion SR with wavelet prior), 'sr' (regression SR).
+    """
+    model_name = str(opt.get('model', '')).lower()
 
-    if model == 'sr':
-        from .SR_model import SRModel as M
-    elif model == 'srgan':
-        from .SRGAN_model import SRGANModel as M
-    elif model == 'srragan':
-        from .SRRaGAN_model import SRRaGANModel as M
-    elif model == 'sftgan':
-        from .SFTGAN_ACD_model import SFTGAN_ACD_Model as M
-    elif model == 'sr3':  # <-- NEW
+    if model_name == 'sr3':
         from .SR3_model import SR3Model as M
+    elif model_name == 'sr':
+        from .SR_model import SRModel as M
     else:
-        raise NotImplementedError('Model [{:s}] not recognized.'.format(model))
+        raise NotImplementedError(f"Model [{model_name}] not recognized. "
+                                  f"Expected one of: 'sr3', 'sr'.")
+
     m = M(opt)
-    logger.info('Model [{:s}] is created.'.format(m.__class__.__name__))
+    logging.getLogger('base').info(f"Model [{m.__class__.__name__}] is created.")
     return m
+
+__all__ = ['create_model']

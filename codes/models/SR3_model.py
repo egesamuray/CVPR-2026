@@ -29,7 +29,7 @@ def soft_histogram(x, bins, xmin, xmax, tau=0.1, eps=1e-12):
 class EMABandPrior:
     def __init__(self, bins=128, momentum=0.99, n_classes=2, device='cpu'):
         self.bins = bins; self.momentum = momentum; self.device = device
-        self.n_classes = n_classes; self.store = {}  # ('LH',c), ('HL',c), ('HH',c) -> [K]
+        self.n_classes = n_classes; self.store = {}
 
     def get(self, band, c):
         key = (band, int(c))
@@ -46,8 +46,15 @@ class EMABandPrior:
 
 class SR3Model(BaseModel):
     r"""
-    L = w_eps * E[ ||eps_hat - eps||^2 ]  +  gamma(t) * Σ_b λ_b * D_b( W_b(\hat x_0), Prior or GT )
-    where D_b is soft-KL (default) or MMD over HF bands b ∈ {LH,HL,HH}. SWT level>1 is supported.
+    Wavelet-prior SR3 training.
+
+    Loss:
+        L = w_eps * E[ ||eps_hat - eps||^2 ]
+            + gamma(t) * Σ_b λ_b * D_b( W_b(\hat{x}_0), Prior or GT )
+
+    where D_b is soft-KL (default) or MMD on HF wavelet bands b ∈ {LH, HL, HH}.
+    SWT (undecimated) is used for shift-invariant band extraction. EMA priors are
+    maintained per band (and class if enabled) and compared via KL(prior || Q).
     """
     def __init__(self, opt):
         super().__init__(opt)
@@ -57,15 +64,14 @@ class SR3Model(BaseModel):
 
         self.scale = int(opt.get('scale', 4))
 
-        # generator (+ optional class-embed)
+        # generator (+ optional class-embed + dropout from JSON)
         num_classes = train_opt.get('num_classes', None) if train_opt.get('use_class_prior', False) else None
         self.netG = SR3UNet(in_ch=net_opt['in_nc'],
                             out_ch=net_opt['out_nc'],
                             base_nf=net_opt.get('nf', 64),
                             num_res_blocks=net_opt.get('num_res_blocks', 2),
-                            num_classes=num_classes).to(self.device)
-
-        # EMA (optional)
+                            num_classes=num_classes,
+                            dropout=net_opt.get('dropout', 0.0)).to(self.device)
         from copy import deepcopy
         self.use_ema = bool(train_opt.get('use_ema', False))
         self.ema_decay = float(train_opt.get('ema_decay', 0.999))
@@ -145,7 +151,8 @@ class SR3Model(BaseModel):
                                        n_classes=self.num_classes or 2, device=self.device) if self.use_class_prior else None
 
         # persist prior
-        self.experiments_root = opt['path']['experiments_root']
+        self.experiments_root = opt.get('path', {}).get('experiments_root',
+                                os.path.join("/content/CVPR-2026/experiments", opt['name']))
         self.prior_path = os.path.join(self.experiments_root, 'band_prior.pt')
         if self.use_class_prior and os.path.exists(self.prior_path):
             try: self._load_persistent_state(torch.load(self.prior_path, map_location='cpu'))
@@ -373,7 +380,13 @@ class SR3Model(BaseModel):
         G.eval()
         with torch.no_grad():
             zeros = torch.zeros(self.var_H.size(0), device=self.device)
-            self.fake_H = G(self.var_H, self.var_L, zeros, class_id=self.class_id)
+            # faces-only: class 0 at test if prior enabled and missing labels
+            class_id = None
+            if self.use_class_prior and (self.class_id is None):
+                class_id = torch.zeros(self.var_H.size(0), device=self.device, dtype=torch.long)
+            else:
+                class_id = self.class_id
+            self.fake_H = G(self.var_H, self.var_L, zeros, class_id=class_id)
         G.train()
 
     def get_current_visuals(self, need_HR=True):
@@ -402,3 +415,4 @@ class SR3Model(BaseModel):
         load_path_G = self.opt['path'].get('pretrain_model_G', None)
         if load_path_G:
             self.load_network(load_path_G, self.netG, strict=True)
+

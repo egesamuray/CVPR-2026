@@ -44,7 +44,8 @@
     "out_nc": 3,
     "nf": 64,
     "num_res_blocks": 2,
-    "num_classes": 1
+    "num_classes": 1,
+    "dropout": 0.2
   },
 
   "network_D": null,
@@ -94,9 +95,10 @@
     "mmd_dtype": "float16",
     "mmd_sigmas": [0.5, 1.0, 2.0],
 
-    "manual_seed": 0,
-    "niter": 60000,
-    "val_freq": 5000.0
+    "warmup_steps": 10000,
+    "niter": 1000000,
+    "val_freq": 10000.0,
+    "manual_seed": 0
   },
 
   "logger": {

@@ -80,11 +80,14 @@ def define_G(opt):
 
     elif which_model == 'SR3UNet':
         import models.modules.diffusion_net as diff_net
-        netG = diff_net.SR3UNet(in_ch=opt_net['in_nc'],
-                                out_ch=opt_net['out_nc'],
-                                base_nf=opt_net.get('nf', 64),
-                                num_res_blocks=opt_net.get('num_res_blocks', 2),
-                                num_classes=opt_net.get('num_classes', None))
+        netG = diff_net.SR3UNet(
+            in_ch=opt_net['in_nc'],
+            out_ch=opt_net['out_nc'],
+            base_nf=opt_net.get('nf', 64),
+            num_res_blocks=opt_net.get('num_res_blocks', 2),
+            num_classes=opt_net.get('num_classes', None),
+            dropout=opt_net.get('dropout', 0.0)    # <── NEW
+        )
     else:
         raise NotImplementedError('Generator model [{:s}] not recognized'.format(which_model))
 

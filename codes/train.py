@@ -84,23 +84,15 @@ def main():
     parser.add_argument('-opt', type=str, required=True, help='Path to options JSON file.')
     args = parser.parse_args()
 
-    # parse options
     opt = option.parse(args.opt, is_train=True)
     ensure_dirs(opt)
 
-    # set random seed
-    if opt['train'].get('manual_seed', None) is not None:
-        seed = int(opt['train']['manual_seed'])
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        np.random.seed(seed)
-
-    # logger
+    # logger etc...
     logger = setup_logger(opt['path']['log'])
     logger.info('export CUDA_VISIBLE_DEVICES={}'.format(os.environ.get('CUDA_VISIBLE_DEVICES', '')))
     logger.info(dict_to_str(opt))
 
-    # datasets & loaders  (NOTE: create_dataloader(dataset, dataset_opt))
+    # datasets (API: create_dataloader(dataset, dataset_opt))
     train_set = create_dataset(opt['datasets']['train'])
     train_loader = create_dataloader(train_set, opt['datasets']['train'])
     logger.info(f"Dataset [{train_set.__class__.__name__} - {opt['datasets']['train']['name']}] is created.")
@@ -111,19 +103,28 @@ def main():
     logger.info(f"Dataset [{val_set.__class__.__name__} - {opt['datasets']['val']['name']}] is created.")
     logger.info(f"Number of val images in [{opt['datasets']['val']['name']}]: {len(val_set)}")
 
-    # model
     model = create_model(opt)
     logger.info(f"Model [{model.__class__.__name__}] is created.")
     logger.info("Start training from epoch: 0, iter: 0")
 
-    # training params
-    niter = int(opt['train']['niter'])
-    print_freq = int(float(opt['logger']['print_freq']))
-    val_freq = int(float(opt['train']['val_freq']))
-    save_freq = int(float(opt['logger']['save_checkpoint_freq']))
-    scale = int(opt.get('scale', 4))
+    # ---- SR3 schedule knobs ----
+    niter         = int(opt['train']['niter'])
+    print_freq    = int(float(opt['logger']['print_freq']))
+    val_freq      = int(float(opt['train']['val_freq']))
+    save_freq     = int(float(opt['logger']['save_checkpoint_freq']))
+    scale         = int(opt.get('scale', 4))
+    warmup_steps  = int(opt['train'].get('warmup_steps', 10000))   # <── NEW (default 10k)
+    base_lr       = float(opt['train'].get('lr_G', 1e-4))          # fixed LR after warmup
+
     current_step = 0
     epoch = 0
+
+    def _apply_warmup(step):
+        if warmup_steps <= 0:
+            return base_lr
+        if step <= warmup_steps:
+            return base_lr * step / float(warmup_steps)
+        return base_lr
 
     try:
         while current_step < niter:
@@ -133,20 +134,21 @@ def main():
                     break
                 current_step += 1
 
+                # warmup -> fixed LR (override scheduler lr if any)
+                lr_now = _apply_warmup(current_step)
+                for pg in model.optimizers[0].param_groups:
+                    pg['lr'] = lr_now
+
                 # one step
                 model.feed_data(train_data)
-                model.optimize_parameters(current_step)  # optimizer.step() is inside
+                model.optimize_parameters(current_step)  # optimizer.step() inside
 
-                # STEP SCHEDULERS AFTER OPTIMIZER to silence warning
+                # schedulers AFTER optimizer (harmless; will be overridden by warmup above)
                 for s in model.schedulers:
                     s.step()
 
                 # logging
                 if current_step % print_freq == 0:
-                    try:
-                        lr_now = model.optimizers[0].param_groups[0]['lr']
-                    except Exception:
-                        lr_now = 0.0
                     logs = model.get_current_log()
                     items = ' '.join([f"{k}: {v:.4e}" for k, v in logs.items()])
                     logger.info(f"<epoch: {epoch:3d}, iter: {current_step:7d}, lr:{lr_now:.3e}> {items} ")
@@ -172,7 +174,6 @@ def main():
                     model.save_training_state(epoch, current_step)
                     logger.info("Saving models and training states.")
 
-        # end of training
         model.save('final')
         logger.info("Saving the final model.")
         logger.info("End of training.")
@@ -182,7 +183,6 @@ def main():
         model.save(current_step)
         model.save_training_state(epoch, current_step)
         logger.info("State saved. Exiting.")
-
 
 if __name__ == '__main__':
     main()

@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 def timestep_embedding(timesteps, embed_dim):
-    """
+    r"""
     Sinusoidal timestep embeddings as in DDPM/Transformers.
     timesteps: [B] float or int; we expect RAW integer steps (0..T-1) for a healthy spectrum.
     returns: [B, embed_dim]
@@ -20,8 +20,8 @@ def timestep_embedding(timesteps, embed_dim):
     return emb
 
 class ResBlock(nn.Module):
-    """Residual block with FiLM-like time/class injection."""
-    def __init__(self, n_channels, time_embed_dim):
+    """Residual block with FiLM-like time/class injection and optional dropout."""
+    def __init__(self, n_channels, time_embed_dim, drop_p=0.0):
         super().__init__()
         self.norm1 = nn.GroupNorm(num_groups=8, num_channels=n_channels)
         self.conv1 = nn.Conv2d(n_channels, n_channels, 3, padding=1)
@@ -29,27 +29,30 @@ class ResBlock(nn.Module):
         self.norm2 = nn.GroupNorm(num_groups=8, num_channels=n_channels)
         self.conv2 = nn.Conv2d(n_channels, n_channels, 3, padding=1)
         self.act = nn.SiLU()
+        self.drop = nn.Dropout(p=drop_p) if drop_p and drop_p > 0 else nn.Identity()
 
     def forward(self, x, t_emb):
         y = self.act(self.norm1(x))
         y = self.conv1(y)
         y = y + self.time_proj(t_emb).unsqueeze(-1).unsqueeze(-1)
+        y = self.drop(y)  # dropout after the FiLM injection (SR3 uses dropout=0.2 for 16->128)
         y = self.act(self.norm2(y))
         y = self.conv2(y)
         return x + y
 
 class SR3UNet(nn.Module):
-    """
+    r"""
     SR3 UNet (x0 parameterization): input is concat(noisy_HR, upsampled_LR) => 6 channels.
     Predicts \hat{x}_0 at timestep t. Optional class_id allows one model to handle multiple classes.
     """
-    def __init__(self, in_ch=3, out_ch=3, base_nf=64, num_res_blocks=2, num_classes=None):
+    def __init__(self, in_ch=3, out_ch=3, base_nf=64, num_res_blocks=2, num_classes=None, dropout=0.0):
         super().__init__()
         self.in_ch = in_ch
         self.out_ch = out_ch
         self.base_nf = base_nf
         self.num_res_blocks = num_res_blocks
         self.num_classes = num_classes
+        self.drop_p = float(dropout)
 
         time_embed_dim = base_nf * 4
         self.time_mlp = nn.Sequential(
@@ -67,20 +70,20 @@ class SR3UNet(nn.Module):
 
         # encoder
         self.conv_in = nn.Conv2d(in_ch * 2, base_nf, 3, padding=1)
-        self.down1 = nn.ModuleList([ResBlock(base_nf, time_embed_dim) for _ in range(num_res_blocks)])
+        self.down1 = nn.ModuleList([ResBlock(base_nf, time_embed_dim, self.drop_p) for _ in range(num_res_blocks)])
         self.down2_conv = nn.Conv2d(base_nf, base_nf * 2, 3, stride=2, padding=1)
-        self.down2 = nn.ModuleList([ResBlock(base_nf * 2, time_embed_dim) for _ in range(num_res_blocks)])
+        self.down2 = nn.ModuleList([ResBlock(base_nf * 2, time_embed_dim, self.drop_p) for _ in range(num_res_blocks)])
         self.down3_conv = nn.Conv2d(base_nf * 2, base_nf * 4, 3, stride=2, padding=1)
-        self.down3 = nn.ModuleList([ResBlock(base_nf * 4, time_embed_dim) for _ in range(num_res_blocks)])
+        self.down3 = nn.ModuleList([ResBlock(base_nf * 4, time_embed_dim, self.drop_p) for _ in range(num_res_blocks)])
 
         # bottleneck
-        self.mid = ResBlock(base_nf * 4, time_embed_dim)
+        self.mid = ResBlock(base_nf * 4, time_embed_dim, self.drop_p)
 
         # decoder
         self.up3_conv = nn.ConvTranspose2d(base_nf * 4, base_nf * 2, 4, stride=2, padding=1)
-        self.up3 = nn.ModuleList([ResBlock(base_nf * 2, time_embed_dim) for _ in range(num_res_blocks)])
+        self.up3 = nn.ModuleList([ResBlock(base_nf * 2, time_embed_dim, self.drop_p) for _ in range(num_res_blocks)])
         self.up2_conv = nn.ConvTranspose2d(base_nf * 2, base_nf, 4, stride=2, padding=1)
-        self.up2 = nn.ModuleList([ResBlock(base_nf, time_embed_dim) for _ in range(num_res_blocks)])
+        self.up2 = nn.ModuleList([ResBlock(base_nf, time_embed_dim, self.drop_p) for _ in range(num_res_blocks)])
 
         self.conv_out = nn.Conv2d(base_nf, out_ch, 3, padding=1)
 
@@ -129,3 +132,4 @@ class SR3UNet(nn.Module):
             x = block(x, t_emb)
 
         return self.conv_out(x)
+

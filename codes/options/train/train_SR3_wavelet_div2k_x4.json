@@ -1,0 +1,113 @@
+{
+  "name": "SR3_wavelet_KL_DIV2Kx4_200k",
+  "use_tb_logger": false,
+  "model": "sr3",
+  "scale": 4,
+  "gpu_ids": [0],
+
+  "datasets": {
+    "train": {
+      "name": "DIV2K_train",
+      "mode": "LRHR",
+      "dataroot_HR": "/content/DIV2K_raw/DIV2K_train_HR",
+      "dataroot_LR": "/content/DIV2Kx4/LR/train",
+      "subset_file": null,
+      "use_shuffle": true,
+      "n_workers": 4,
+      "batch_size": 16,
+      "HR_size": 128,
+      "use_flip": true,
+      "use_rot": true,
+      "phase": "train",
+      "scale": 4,
+      "data_type": "img"
+    },
+    "val": {
+      "name": "DIV2K_val",
+      "mode": "LRHR",
+      "dataroot_HR": "/content/DIV2K_raw/DIV2K_valid_HR",
+      "dataroot_LR": "/content/DIV2Kx4/LR/val",
+      "phase": "val",
+      "scale": 4,
+      "data_type": "img"
+    }
+  },
+
+  "path": {
+    "root": "./",
+    "pretrain_model_G": null,
+    "experiments_root": "/content/CVPR-2026/experiments/SR3_wavelet_KL_DIV2Kx4_200k",
+    "models":          "/content/CVPR-2026/experiments/SR3_wavelet_KL_DIV2Kx4_200k/models",
+    "training_state":  "/content/CVPR-2026/experiments/SR3_wavelet_KL_DIV2Kx4_200k/training_state",
+    "log":             "/content/CVPR-2026/experiments/SR3_wavelet_KL_DIV2Kx4_200k",
+    "val_images":      "/content/CVPR-2026/experiments/SR3_wavelet_KL_DIV2Kx4_200k/val_images"
+  },
+
+  "network_G": {
+    "which_model_G": "SR3UNet",
+    "in_nc": 3,
+    "out_nc": 3,
+    "nf": 128,
+    "num_res_blocks": 3,
+    "num_classes": null,
+    "dropout": 0.0
+  },
+
+  "network_D": null,
+
+  "train": {
+    "diffusion_steps": 1000,
+    "beta_schedule": "cosine",
+
+    "lr_G": 1e-4,
+    "warmup_steps": 10000,
+    "weight_decay_G": 0,
+    "beta1_G": 0.9,
+
+    "lr_scheme": "MultiStepLR",
+    "lr_steps": [50000],
+    "lr_gamma": 0.5,
+
+    "wavelet_filter": "sym7",
+    "wavelet_level": 2,
+
+    "pixel_criterion": "l2",
+    "pixel_weight":   0.15,
+    "pixel_weight_lh": 0.03,
+    "pixel_weight_hl": 0.03,
+    "pixel_weight_hh": 0.06,
+
+    "eps_weight": 1.0,
+    "t_weight_eps": "sigma_inv_sq",
+
+    "wavelet_loss": "softkl",
+    "gamma_a": 1.0,
+    "gamma_b": 6.0,
+
+    "use_class_prior": false,
+    "num_classes": 0,
+    "hist_bins": 64,
+    "hist_min": -0.09136,
+    "hist_max":  0.09119,
+    "hist_tau":  0.20,
+    "prior_momentum": 0.99,
+
+    "use_ema": true,
+    "ema_decay": 0.999,
+
+    "lr_consistency_weight": 0.01,
+
+    "mmd_max_points": 2048,
+    "mmd_dtype": "float16",
+    "mmd_sigmas": [0.5, 1.0, 2.0],
+
+    "manual_seed": 0,
+    "niter": 200000,
+    "val_freq": 10000.0
+  },
+
+  "logger": {
+    "print_freq": 200,
+    "save_checkpoint_freq": 10000.0
+  }
+}
